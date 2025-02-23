@@ -1,4 +1,3 @@
-import datetime
 import hashlib
 import time
 import random
@@ -12,34 +11,54 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.common.by import By
 from logger import Logger
 import os
+from config import Config
+from datetime import datetime  # 确保正确导入
+from concurrent.futures import ThreadPoolExecutor  # 导入 ThreadPoolExecutor
+import signal
+import sys
+import subprocess
 
-global_config = {
-    "server": "localhost",  # 替换为默认服务器地址
-    "port": 4723  # 替换为默认端口
-}
+logger = Logger("Automator")
 
-logger = Logger()
+def signal_handler(sig, frame):
+    """处理信号，确保日志写入磁盘"""
+    logger.error("signal_handler execute")
+    logger.stop()  # 停止日志记录
+    sys.exit(0)
+
+# 注册信号处理器
+signal.signal(signal.SIGINT, signal_handler)  # 捕获 Ctrl+C
+signal.signal(signal.SIGTERM, signal_handler)  # 捕获终止信号
 
 class Automator:
-    def __init__(self, device_config):
-        logger.debug("Initializing Automator with device config: {}".format(device_config))
-        server = device_config.get("server", global_config["server"])
-        port = device_config.get("port", global_config["port"])
+    def __init__(self, config, device_config=None):
+        self.config = config
+        self.device_config = device_config
+        server = self.config.get("server", "localhost")  # 默认服务器地址
+        port = self.config.get("port", 4723)  # 默认端口
+
+        logger.debug("Initializing Automator with config: {}".format(self.config.config_data))
+        logger.debug("Initializing Automator with device config: {}".format(self.device_config))
+        
+        desired_capabilities = {
+            "platformName": self.config.get("platformName", "Android"),  # 默认平台名称
+            "appium:automationName": self.config.get("appium:automationName", "UiAutomator2"),  # 默认自动化名称
+            "appium:appPackage": self.config.get("appium:appPackage", "com.xunmeng.pinduoduo"),  # 默认应用包名
+            "appium:appActivity": self.config.get("appium:appActivity", ".ui.activity.MainFrameActivity"),  # 默认应用活动
+            "appium:forceAppLaunch": self.config.get("appium:forceAppLaunch", True),  # 默认强制启动应用
+            "appium:noReset": self.config.get("appium:noReset", True),  # 默认不重置应用
+            "appium:printPageSourceOnFindFailure": self.config.get("appium:printPageSourceOnFindFailure", True),  # 默认打印页面源代码
+            "appium:skipDeviceInitialization": self.config.get("appium:skipDeviceInitialization", True),  # 默认跳过设备初始化
+            "appium:unicodeKeyBoard": self.config.get("appium:unicodeKeyBoard", True),  # 默认使用 Unicode 键盘
+        }
+
+        if device_config:
+            desired_capabilities["appium:deviceName"] = device_config.get("device_name")
+            desired_capabilities["appium:udid"] = device_config.get("udid")
+
         self.driver = webdriver.Remote(
             command_executor=f'http://{server}:{port}',
-            desired_capabilities={
-                "platformName": "Android",
-                "appium:automationName": "UiAutomator2",
-                "appium:appPackage": "com.xunmeng.pinduoduo",
-                "appium:appActivity": ".ui.activity.MainFrameActivity",
-                "appium:forceAppLaunch": True,
-                "appium:noReset": True,
-                "appium:printPageSourceOnFindFailure": True,
-                "appium:skipDeviceInitialization": True,
-                "appium:unicodeKeyBoard": True
-                # "appium:deviceName": device_config["device_name"],
-                # "appium:udid": device_config["udid"],
-            }
+            desired_capabilities=desired_capabilities
         )
         logger.debug("WebDriver initialized successfully.")
         try:
@@ -251,34 +270,90 @@ class Automator:
     def close(self):
         """关闭驱动"""
         logger.debug("Closing the WebDriver.")
+        logger.stop()
         self.driver.quit()
 
 
-def process_device(device_config):
+    def process_whole_flow(self):
+        """处理全流程的自动化流程"""        
+        try:
+            self.handle_popups_and_navigate() 
+            keyword = self.device_config.get("keyword")
+            if keyword is None:
+                raise ValueError("Keyword is required but not provided in device_config.")
+            self.search_keyword(keyword)
+            self.handle_product_detail(True)
+        except Exception as e:
+            logger.error("Error occurred while process_whole_flow: {}".format(str(e)))
+            self.screenshot('process_whole_flow')
+        finally:
+            self.close()
+
+    def process_swip_flow(self):
+        """处理单流程的自动化流程"""        
+        try:
+            self.handle_product_detail(True)
+        except Exception as e:
+            logger.error("Error occurred while process_whole_flow: {}".format(str(e)))
+            self.screenshot('process_whole_flow')
+        finally:
+            self.close()
+
+
+def process_whole_flow(device_config):
     """处理单个设备的自动化流程"""
-    automator = Automator(device_config)
+    logger.debug("execute beigin")
+    config = Config("config.json")  # 创建 Config 对象
+    automator = Automator(config, device_config)  # 将 Config 对象传入 Automator
     
     try:
-        automator.handle_popups_and_navigate()
-        automator.search_keyword("hello")
-        automator.handle_product_detail(True)
+        automator.process_whole_flow()
+    except Exception as e:
+        logger.error("Error occurred while processing device {}: {}".format(device_config.get("device_name"), str(e)))
     finally:
-        automator.close()
+        logger.debug("execute over")
+
+def process_swip_flow(device_config):
+    """处理单个设备的自动化流程"""
+    logger.debug("execute beigin")
+    config = Config("simple_config.json")  # 创建 Config 对象
+    automator = Automator(config, device_config)  # 将 Config 对象传入 Automator
+
+    try:
+        automator.process_swip_flow()
+    except Exception as e:
+        logger.error("Error occurred while processing device {}: {}".format(device_config.get("device_name"), str(e)))
+    finally:
+        logger.debug("execute over")
+
+def get_connected_devices():
+    """通过 adb 获取所有连接的设备 ID"""
+    try:
+        # 执行 adb devices 命令
+        result = subprocess.run(['adb', 'devices'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        output = result.stdout.strip().split('\n')[1:]  # 跳过第一行
+        devices = []
+        for line in output:
+            if line.strip():  # 确保行不为空
+                device_id = line.split()[0]  # 获取设备 ID
+                devices.append(device_id)
+        return devices
+    except Exception as e:
+        logger.error(f"Failed to get connected devices: {str(e)}")
+        return []
 
 if __name__ == "__main__":
-    # 设备配置示例
-    devices_config = [
-        {
-            "device_name": "device1",
-            "udid": "ABCD1234"
-        },
-        {
-            "device_name": "device2",
-            "udid": "EFGH5678"
-        }
-    ]
-    
-    process_device(devices_config[0])
+    # 获取所有连接的设备 ID
+    connected_devices = get_connected_devices()
+
+    # 生成设备配置示例
+    device_configs = []
+    for i, udid in enumerate(connected_devices):
+        device_configs.append({
+            "device_name": f"device{i + 1}",  # 设备名称为 device1, device2, ...
+            "udid": udid
+        })
+
     # 使用线程池并行执行
-    # with ThreadPoolExecutor(max_workers=len(devices_config)) as executor:
-    #     executor.map(process_device, devices_config)
+    with ThreadPoolExecutor(max_workers=len(device_configs)) as executor:
+        executor.map(process_swip_flow, device_configs)
